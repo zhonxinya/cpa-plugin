@@ -52,6 +52,22 @@ class ReleaseWorkflowTest(unittest.TestCase):
         # darwin cgo builds cannot cross-compile from a Linux runner.
         self.assertIn("runner: macos-14", text)
 
+    def test_github_workflow_builds_arm64_natively(self):
+        # A c-shared library needs a target compiler, and the x64 cross toolchain
+        # failed on the first release attempt, so arm64 builds on the native
+        # arm64 runner with no cross compiler at all.
+        text = self.read(GITHUB_WORKFLOW)
+        self.assertIn("runner: ubuntu-24.04-arm", text)
+        self.assertNotIn("gcc-aarch64-linux-gnu", text)
+        self.assertNotIn("CC=aarch64-linux-gnu-gcc", text)
+
+    def test_github_workflow_reports_build_failures_as_annotations(self):
+        # Job logs need authentication; annotations stay public, so a failed
+        # build must surface its reason there.
+        text = self.read(GITHUB_WORKFLOW)
+        self.assertIn("::error title=build failed", text)
+        self.assertIn('log="$RUNNER_TEMP/build-${GOOS}-${GOARCH}.log"', text)
+
     def test_gitea_workflow_uses_a_pat_and_needs_no_github_api(self):
         text = self.read(GITEA_WORKFLOW)
         self.assertIn("secrets.RELEASE_TOKEN", text)

@@ -121,12 +121,14 @@ GitHub 只读 `.github/workflows/`，Gitea 只读 `.gitea/workflows/`，两者�
 
 | 宿主 | 工作流 | 覆盖平台 |
 | --- | --- | --- |
-| GitHub | `.github/workflows/release-opencode-go.yml` | `darwin/arm64`（macos-14）、`linux/amd64`、`linux/arm64` |
-| Gitea | `.gitea/workflows/release-opencode-go.yml` | `linux/amd64`、`linux/arm64` |
+| GitHub | `.github/workflows/release-opencode-go.yml` | `darwin/arm64`（`macos-14`）、`linux/amd64`（`ubuntu-24.04`）、`linux/arm64`（`ubuntu-24.04-arm`） |
+| Gitea | `.gitea/workflows/release-opencode-go.yml` | `linux/amd64`、`linux/arm64`（后者交叉编译） |
 
 两套都会在 `main` 分支推送或 PR 时由 `validate-store.yml` 先跑校验。
 
-> **macOS 工件只能由 macOS 主机产出**（cgo 无法跨平台编译 darwin）。Gitea Runner 通常是 Linux 容器，因此 Gitea 侧不产出 darwin 工件；需要时用下面的「本地手工发布」在 macOS 上补传。
+> **插件是 c-shared 动态库，cgo 需要目标平台的编译器。** GitHub 侧在匹配架构的原生 runner 上构建（`ubuntu-24.04-arm` 是公共仓库的标准 arm64 runner，免费），因此不需要交叉工具链；Gitea runner 通常是 x64，只能交叉编译 linux/arm64（需 `gcc-aarch64-linux-gnu`），若你的 Gitea 实例有 arm64 runner，建议直接用它并删掉交叉编译步骤。
+>
+> **macOS 工件只能由 macOS 主机产出**（无法从 Linux 交叉编译 darwin），因此 Gitea 侧不产出 darwin 工件；需要时用下面的「本地手工发布」在 macOS 上补传。
 
 ### 一次性准备
 

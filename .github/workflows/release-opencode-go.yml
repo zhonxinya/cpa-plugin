@@ -22,13 +22,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # The plugin is a c-shared library, so cgo needs a compiler for the
+          # target. Build natively on a matching runner instead of
+          # cross-compiling: ubuntu-24.04-arm is a standard arm64 runner.
           - runner: macos-14
             goos: darwin
             goarch: arm64
           - runner: ubuntu-24.04
             goos: linux
             goarch: amd64
-          - runner: ubuntu-24.04
+          - runner: ubuntu-24.04-arm
             goos: linux
             goarch: arm64
     steps:
@@ -57,24 +60,23 @@ jobs:
           go vet ./...
           python3 -m unittest discover -s scripts -p 'test_*.py' -v
 
-      - name: Install the linux/arm64 cross compiler
-        if: matrix.goos == 'linux' && matrix.goarch == 'arm64'
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install --yes gcc-aarch64-linux-gnu
-
       - name: Build and verify archive
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           OUT_DIR: ${{ runner.temp }}/dist
         run: |
-          set -euo pipefail
-          if [ "$GOOS" = "linux" ] && [ "$GOARCH" = "arm64" ]; then
-            export CC=aarch64-linux-gnu-gcc
+          set -uo pipefail
+          log="$RUNNER_TEMP/build-${GOOS}-${GOARCH}.log"
+          if ! bash opencode-go/scripts/build-archives.sh >"$log" 2>&1; then
+            # Job logs require authentication, but step annotations do not, so
+            # publish the failure reason where it can be read later.
+            echo "::error title=build failed ($GOOS/$GOARCH)::$(tail -n 25 "$log" | tr '\n' '|')"
+            echo "--- build log ---"
+            cat "$log"
+            exit 1
           fi
-          bash opencode-go/scripts/build-archives.sh
+          cat "$log"
 
       - name: Upload release files
         uses: actions/upload-artifact@v4
