@@ -58,6 +58,16 @@ def parse_args() -> argparse.Namespace:
         "--api-base",
         help="REST API base override; defaults to https://api.github.com for github.com and <api-url>/api/v1 otherwise",
     )
+    parser.add_argument(
+        "--uploads-base",
+        help="asset upload base override; defaults to https://uploads.github.com for GitHub and <api-base> otherwise",
+    )
+    parser.add_argument(
+        "--host-flavor",
+        choices=("auto", "github", "gitea"),
+        default="auto",
+        help="asset path style; auto detects GitHub from the API base (default: auto)",
+    )
     parser.add_argument("--token-env", help="environment variable holding the API token (default: " + ", ".join(TOKEN_ENV_CANDIDATES) + ")")
     parser.add_argument("--token-file", type=Path, help="file holding the API token")
     parser.add_argument("--replace", action="store_true", help="delete and re-upload an asset that already exists")
@@ -82,6 +92,69 @@ def api_base_for(instance: str, override: str | None) -> str:
     if host == "github.com":
         return "https://api.github.com"
     return f"{instance}/api/v1"
+
+
+def uploads_base_for(api_base: str, flavor: str, override: str | None) -> str:
+    """Resolve the asset upload base.
+
+    GitHub refuses asset uploads on api.github.com and serves them from
+    uploads.github.com (GitHub Enterprise uses /api/uploads). Gitea has no such
+    split, so its uploads share the API base.
+    """
+    if override:
+        return override.rstrip("/")
+    base = api_base.rstrip("/")
+    if flavor != "github":
+        return base
+    if base == "https://api.github.com":
+        return "https://uploads.github.com"
+    if base.endswith("/api/v3"):
+        return base[: -len("/api/v3")] + "/api/uploads"
+    return base
+
+
+def host_flavor_for(api_base: str, override: str | None) -> str:
+    """Classify the release host, because asset paths differ between them."""
+    if override and override != "auto":
+        return override
+    host = (urllib.parse.urlparse(api_base).hostname or "").lower()
+    if host == "api.github.com" or host == "uploads.github.com":
+        return "github"
+    if api_base.rstrip("/").endswith("/api/v3"):
+        return "github"
+    return "gitea"
+
+
+def upload_endpoint(
+    release: dict,
+    api: str,
+    repo: str,
+    flavor: str,
+    uploads_base: str,
+) -> str:
+    """Resolve the asset upload URL for one release.
+
+    GitHub returns the exact upload URL as a hypermedia template in upload_url
+    and its host differs from the API host, so prefer it. Fall back to the
+    derived uploads base when a host does not provide it.
+    """
+    template = str(release.get("upload_url") or "").strip()
+    if template:
+        return template.split("{", 1)[0]
+    base = uploads_base.rstrip("/") or api.rstrip("/")
+    return f"{base}/repos/{repo}/releases/{release['id']}/assets"
+
+
+def asset_delete_url(api: str, repo: str, flavor: str, release_id: int, asset_id: int) -> str:
+    """Build the asset delete URL.
+
+    GitHub addresses an asset directly (/releases/assets/{id}); Gitea nests it
+    under the release (/releases/{id}/assets/{id}).
+    """
+    base = api.rstrip("/")
+    if flavor == "github":
+        return f"{base}/repos/{repo}/releases/assets/{asset_id}"
+    return f"{base}/repos/{repo}/releases/{release_id}/assets/{asset_id}"
 
 
 def resolve_token(args: argparse.Namespace) -> str:
@@ -200,6 +273,8 @@ def upload_asset(
     token: str,
     timeout: float,
     replace: bool,
+    flavor: str,
+    uploads_base: str,
 ) -> dict:
     name = asset.name
     existing = next((item for item in release.get("assets") or [] if item.get("name") == name), None)
@@ -208,24 +283,30 @@ def upload_asset(
             fail(f"{name} is already attached to release {release['tag_name']}; pass --replace to overwrite it")
         status, body = api_request(
             "DELETE",
-            f"{api}/repos/{repo}/releases/{release['id']}/assets/{existing['id']}",
+            asset_delete_url(api, repo, flavor, release["id"], existing["id"]),
             token,
             timeout=timeout,
         )
         if status not in (204, 200):
-            fail(f"delete existing attachment {name}: HTTP {status}: {body[:200]!r}")
+            fail(f"delete existing asset {name}: HTTP {status}: {body[:200]!r}")
     query = urllib.parse.urlencode({"name": name})
     status, body = api_request(
         "POST",
-        f"{api}/repos/{repo}/releases/{release['id']}/assets?{query}",
+        f"{upload_endpoint(release, api, repo, flavor, uploads_base)}?{query}",
         token,
         data=asset.read_bytes(),
-        content_type="application/octet-stream",
+        content_type="application/zip",
         timeout=timeout,
     )
     if status != 201:
         fail(f"upload {name}: HTTP {status}: {body[:200]!r}")
-    return json.loads(body)
+    uploaded = json.loads(body)
+    # GitHub silently renames assets containing unusual characters, which would
+    # break the registry URL, so refuse to continue on a name mismatch.
+    returned = str(uploaded.get("name") or "").strip()
+    if returned and returned != name:
+        fail(f"host stored the asset as {returned!r} instead of {name!r}; registry URLs would be wrong")
+    return uploaded
 
 
 def verify_download(url: str, expected_sha: str, token: str, timeout: float) -> None:
@@ -289,6 +370,8 @@ def main() -> int:
     if instance.endswith("/api/v1"):
         instance = instance[: -len("/api/v1")]
     api = api_base_for(instance, args.api_base)
+    flavor = host_flavor_for(api, args.host_flavor)
+    uploads_base = uploads_base_for(api, flavor, args.uploads_base)
     if "/" not in args.repo.strip("/"):
         fail("--repo must be owner/repo")
     repo = args.repo.strip("/")
@@ -308,7 +391,10 @@ def main() -> int:
         print(f"{asset.name}: {goos}/{goarch}, {size} bytes, sha256 {digest}")
 
     if args.dry_run:
+        print(f"dry run: host flavor {flavor}, api {api}")
         print(f"dry run: would publish {len(artifacts)} asset(s) to {api}/repos/{repo} release {tag}")
+        if flavor == "github":
+            print(f"dry run: asset uploads would use {uploads_base}")
         if args.registry:
             print(f"dry run: would update {args.registry}")
         return 0
@@ -317,9 +403,10 @@ def main() -> int:
     release = ensure_release(api, repo, tag, token, args.timeout)
     print(f"release {tag} id={release['id']}")
     for asset, artifact in zip(args.asset, artifacts):
-        uploaded = upload_asset(api, repo, release, asset, token, args.timeout, args.replace)
-        name = uploaded.get("name") or asset.name
-        print(f"uploaded {name}")
+        uploaded = upload_asset(
+            api, repo, release, asset, token, args.timeout, args.replace, flavor, uploads_base
+        )
+        print(f"uploaded {uploaded.get('name') or asset.name}")
         if not args.skip_download_verify:
             verify_download(artifact["url"], artifact["sha256"], token, args.timeout)
             print(f"verified {artifact['url']}")

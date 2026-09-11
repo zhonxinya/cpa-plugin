@@ -25,15 +25,23 @@ def write_archive(path: Path, payload: bytes) -> str:
 
 
 class StubGitea:
-    """Minimal Gitea release API double covering create/upload/download/delete."""
+    """Minimal Gitea/GitHub release API double.
 
-    def __init__(self):
+    Covers create/upload/download/delete and both asset path styles: Gitea nests
+    assets under the release, GitHub addresses them directly. Releases carry
+    upload_url only when include_upload_url is set, so tests can exercise both
+    the hypermedia path (GitHub) and the derived path (Gitea).
+    """
+
+    def __init__(self, include_upload_url=False, rename_assets=None):
         self.releases = {}
         self.blobs = {}
         self.downloads = []
         self.next_release_id = 1
         self.next_asset_id = 1
+        self.rename_assets = rename_assets or {}
         stub = self
+        stub_include_upload_url = include_upload_url
 
         class Handler(BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
@@ -100,6 +108,11 @@ class StubGitea:
                         "name": payload.get("name") or tag,
                         "assets": [],
                     }
+                    if stub_include_upload_url:
+                        release["upload_url"] = (
+                            f"{stub.base}/api/v1/repos/{REPO}/releases/"
+                            f"{release['id']}/assets{{?name,label}}"
+                        )
                     stub.next_release_id += 1
                     stub.releases[tag] = release
                     return self._json(201, release)
@@ -111,14 +124,17 @@ class StubGitea:
                     name = parse_qs(parsed.query).get("name", [""])[0]
                     if not name:
                         return self._json(400, {"message": "name required"})
+                    # GitHub renames assets with unusual characters; the stub can
+                    # emulate that so the guard is exercised.
+                    stored = stub.rename_assets.get(name, name)
                     asset = {
                         "id": stub.next_asset_id,
-                        "name": name,
-                        "browser_download_url": f"{stub.base}/{REPO}/releases/download/{release['tag_name']}/{name}",
+                        "name": stored,
+                        "browser_download_url": f"{stub.base}/{REPO}/releases/download/{release['tag_name']}/{stored}",
                     }
                     stub.next_asset_id += 1
                     release["assets"].append(asset)
-                    stub.blobs[(release["tag_name"], name)] = body
+                    stub.blobs[(release["tag_name"], stored)] = body
                     return self._json(201, asset)
                 return self._json(404, {"message": "not found"})
 
@@ -127,18 +143,33 @@ class StubGitea:
                 parts = [unquote(part) for part in parsed.path.strip("/").split("/")]
                 if not self._authorized():
                     return
-                # /api/v1/repos/{owner}/{repo}/releases/{id}/assets/{asset_id}
+                release = None
+                asset_id = None
+                # Gitea: /api/v1/repos/{o}/{r}/releases/{id}/assets/{asset_id}
                 if len(parts) == 9 and parts[5] == "releases" and parts[7] == "assets":
                     release = next((item for item in stub.releases.values() if str(item["id"]) == parts[6]), None)
-                    if release is None:
-                        return self._json(404, {"message": "release not found"})
-                    asset = next((item for item in release["assets"] if str(item["id"]) == parts[8]), None)
-                    if asset is None:
-                        return self._json(404, {"message": "asset not found"})
-                    release["assets"].remove(asset)
-                    stub.blobs.pop((release["tag_name"], asset["name"]), None)
-                    return self._send(204)
-                return self._json(404, {"message": "not found"})
+                    asset_id = parts[8]
+                # GitHub: /api/v1/repos/{o}/{r}/releases/assets/{asset_id}
+                elif len(parts) == 8 and parts[5:7] == ["releases", "assets"]:
+                    asset_id = parts[7]
+                    release = next(
+                        (
+                            item
+                            for item in stub.releases.values()
+                            if any(str(a["id"]) == asset_id for a in item["assets"])
+                        ),
+                        None,
+                    )
+                else:
+                    return self._json(404, {"message": "not found"})
+                if release is None:
+                    return self._json(404, {"message": "release not found"})
+                asset = next((item for item in release["assets"] if str(item["id"]) == asset_id), None)
+                if asset is None:
+                    return self._json(404, {"message": "asset not found"})
+                release["assets"].remove(asset)
+                stub.blobs.pop((release["tag_name"], asset["name"]), None)
+                return self._send(204)
 
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.base = f"http://127.0.0.1:{self.httpd.server_port}"
@@ -371,6 +402,114 @@ class PublishGiteaReleaseTest(unittest.TestCase):
         self.assertIn('if host == "github.com":', source)
         self.assertIn('return "https://api.github.com"', source)
         self.assertIn('return f"{instance}/api/v1"', source)
+
+    def test_github_flavor_uses_upload_url_and_flat_asset_paths(self):
+        # GitHub serves uploads from uploads.github.com and returns the exact URL
+        # in upload_url; deletes address the asset directly, without a release id.
+        self.server.close()
+        self.server = StubGitea(include_upload_url=True)
+        self.addCleanup(self.server.close)
+
+        result = self.run_publisher(
+            "--api-url",
+            "https://github.com",
+            "--api-base",
+            f"{self.server.base}/api/v1",
+            "--repository-url",
+            f"{self.server.base}/{REPO}",
+            "--replace",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        release = self.server.releases["v0.1.0"]
+        self.assertEqual(len(release["assets"]), 2)
+        self.assertEqual(len(self.server.downloads), 2)
+
+    def test_github_flavor_derives_uploads_base_when_upload_url_is_absent(self):
+        self.server.close()
+        self.server = StubGitea(include_upload_url=False)
+        self.addCleanup(self.server.close)
+
+        result = self.run_publisher(
+            "--api-url",
+            "https://github.com",
+            "--api-base",
+            f"{self.server.base}/api/v1",
+            "--uploads-base",
+            f"{self.server.base}/api/v1",
+            "--repository-url",
+            f"{self.server.base}/{REPO}",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(self.server.releases["v0.1.0"]["assets"]), 2)
+
+    def test_github_replace_deletes_through_the_flat_asset_path(self):
+        self.server.close()
+        self.server = StubGitea(include_upload_url=True)
+        self.addCleanup(self.server.close)
+
+        first = self.run_publisher(
+            "--api-url",
+            "https://github.com",
+            "--api-base",
+            f"{self.server.base}/api/v1",
+            "--repository-url",
+            f"{self.server.base}/{REPO}",
+        )
+        self.assertEqual(first.returncode, 0, first.stderr)
+
+        second = self.run_publisher(
+            "--api-url",
+            "https://github.com",
+            "--api-base",
+            f"{self.server.base}/api/v1",
+            "--repository-url",
+            f"{self.server.base}/{REPO}",
+            "--replace",
+        )
+
+        self.assertEqual(second.returncode, 0, second.stderr)
+        # A replace must reuse the asset ids, proving the delete worked.
+        assets = self.server.releases["v0.1.0"]["assets"]
+        self.assertEqual(len(assets), 2)
+        self.assertEqual(sorted(asset["id"] for asset in assets), [3, 4])
+
+    def test_fails_when_the_host_renames_an_asset(self):
+        self.server.close()
+        self.server = StubGitea(
+            include_upload_url=True,
+            rename_assets={self.darwin.name: "renamed-darwin.zip"},
+        )
+        self.addCleanup(self.server.close)
+
+        result = self.run_publisher(
+            "--api-url",
+            "https://github.com",
+            "--api-base",
+            f"{self.server.base}/api/v1",
+            "--repository-url",
+            f"{self.server.base}/{REPO}",
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("registry URLs would be wrong", result.stderr)
+
+    def test_host_flavor_and_uploads_base_are_reported_in_dry_run(self):
+        result = self.run_publisher(
+            "--api-url", "https://github.com", "--dry-run"
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("host flavor github", result.stdout)
+        self.assertIn("https://uploads.github.com", result.stdout)
+
+    def test_gitea_dry_run_does_not_mention_github_uploads(self):
+        result = self.run_publisher("--dry-run")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("host flavor gitea", result.stdout)
+        self.assertNotIn("uploads.github.com", result.stdout)
 
 
 if __name__ == "__main__":

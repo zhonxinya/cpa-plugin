@@ -186,10 +186,23 @@ Token 只从环境变量或 `--token-file` 读取，不接受命令行明文，�
 | 开关 | 说明 |
 | --- | --- |
 | `--api-base` | 覆盖 REST API 基址。默认 `github.com` → `https://api.github.com`，其他宿主 → `{实例}/api/v1`（GitHub Enterprise 可指向 `https://ghe.example.com/api/v3`）。 |
-| `--dry-run` | 只打印计划与 SHA-256，不访问宿主。 |
-| `--replace` | 附件已存在时先删除再上传（重复发布会话）。 |
+| `--uploads-base` | 覆盖资产上传基址。默认 GitHub → `https://uploads.github.com`，其他宿主 → 同 `--api-base`。 |
+| `--host-flavor` | 资产路径风格：`auto`（默认）/ `github` / `gitea`。 |
+| `--dry-run` | 只打印计划、识别的宿主风格与 SHA-256，不访问宿主。 |
+| `--replace` | 资产已存在时先删除再上传（重复发布会话）。 |
 | `--registry <path>` | 就地更新 `registry.json`，保留已手写的名称/描述/标签。 |
 | `--skip-download-verify` | 跳过发布后的回下载校验（不建议）。 |
+
+**两个平台在资产接口上的差异**（脚本已自动处理）：
+
+| 差异点 | GitHub | Gitea |
+| --- | --- | --- |
+| 上传基址 | **`uploads.github.com`**，不能用 `api.github.com` | 与 API 同基址 |
+| 上传地址来源 | 优先用 Create Release 返回的 `upload_url`（超媒体模板，自动去掉 `{?name,label}`） | 从 `--api-base` 推导 |
+| 删除资产 | `DELETE /releases/assets/{asset_id}` | `DELETE /releases/{release_id}/assets/{asset_id}` |
+| 重复文件名 | 返回 422，必须先删除 | 提示使用 `--replace` |
+
+另外脚本会在上传后**校验宿主存储的文件名与本地一致**：GitHub 会静默重命名含特殊字符的资产，一旦改名就会与 `registry.json` 里的 URL 不符，脚本会直接报错而不是留下一个下载 404 的条目。
 
 脚本会从文件名解析 `goos`/`goarch`，并强制校验 `<id>`、`--version` 与文件名一致——命名不符合商店约定的归档会直接报错，从源头避免商店无法安装。
 
