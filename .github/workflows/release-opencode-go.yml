@@ -119,6 +119,11 @@ jobs:
             --asset "release-assets/opencode-go_${VERSION}_linux_amd64.zip" \
             --asset "release-assets/opencode-go_${VERSION}_linux_arm64.zip" \
             --registry registry.json \
+            --registry-name "OpenCode Go" \
+            --registry-description "OpenCode Go 订阅用量看板（滚动 5 小时 / 每周 / 每月），并把 OpenCode Go 作为 CPA 供应商提供。" \
+            --registry-tag Usage \
+            --registry-tag Provider \
+            --registry-tag OpenCode \
             --replace
 
       - name: Validate the updated registry

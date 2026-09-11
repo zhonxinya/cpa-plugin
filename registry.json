@@ -3,15 +3,17 @@
   "plugins": [
     {
       "id": "opencode-go",
+      "name": "OpenCode Go",
+      "description": "OpenCode Go 订阅用量看板（滚动 5 小时 / 每周 / 每月），并把 OpenCode Go 作为 CPA 供应商提供。",
       "author": "zhonxinya",
       "license": "MIT",
       "version": "0.1.0",
       "repository": "https://github.com/zhonxinya/cpa-plugin",
-      "name": "opencode-go",
-      "description": "opencode-go plugin",
       "homepage": "https://github.com/zhonxinya/cpa-plugin",
       "tags": [
-        "Usage"
+        "Usage",
+        "Provider",
+        "OpenCode"
       ],
       "install": {
         "type": "direct",
