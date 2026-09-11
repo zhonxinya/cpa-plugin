@@ -1,0 +1,139 @@
+name: Release opencode-go
+
+# GitHub reads workflows only from <repo>/.github/workflows/. The Gitea twin
+# lives in .gitea/workflows/; both call the same build and publish scripts.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.goos }}-${{ matrix.goarch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            goos: darwin
+            goarch: arm64
+          - runner: ubuntu-24.04
+            goos: linux
+            goarch: amd64
+          - runner: ubuntu-24.04
+            goos: linux
+            goarch: arm64
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: opencode-go/go.mod
+          cache-dependency-path: opencode-go/go.sum
+
+      - name: Validate release version
+        run: |
+          set -euo pipefail
+          VERSION="$(tr -d '[:space:]' < opencode-go/VERSION)"
+          test -n "$VERSION"
+          test "$GITHUB_REF_NAME" = "v$VERSION"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Run plugin tests
+        working-directory: opencode-go
+        run: |
+          set -euo pipefail
+          go test ./...
+          go vet ./...
+          python3 -m unittest discover -s scripts -p 'test_*.py' -v
+
+      - name: Install the linux/arm64 cross compiler
+        if: matrix.goos == 'linux' && matrix.goarch == 'arm64'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes gcc-aarch64-linux-gnu
+
+      - name: Build and verify archive
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          OUT_DIR: ${{ runner.temp }}/dist
+        run: |
+          set -euo pipefail
+          if [ "$GOOS" = "linux" ] && [ "$GOARCH" = "arm64" ]; then
+            export CC=aarch64-linux-gnu-gcc
+          fi
+          bash opencode-go/scripts/build-archives.sh
+
+      - name: Upload release files
+        uses: actions/upload-artifact@v4
+        with:
+          name: opencode-go-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            ${{ runner.temp }}/dist/opencode-go_${{ env.VERSION }}_${{ matrix.goos }}_${{ matrix.goarch }}.zip
+            ${{ runner.temp }}/dist/opencode-go_${{ env.VERSION }}_${{ matrix.goos }}_${{ matrix.goarch }}.zip.sha256
+          if-no-files-found: error
+
+  publish:
+    name: Publish release and update the registry
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Download release files
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Publish release assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION="$(tr -d '[:space:]' < opencode-go/VERSION)"
+          test "$GITHUB_REF_NAME" = "v$VERSION"
+          # --api-url github.com resolves to the GitHub REST API automatically.
+          python3 scripts/publish-release.py \
+            --api-url "https://github.com" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --tag "${GITHUB_REF_NAME}" \
+            --plugin-id opencode-go \
+            --version "${VERSION}" \
+            --asset "release-assets/opencode-go_${VERSION}_darwin_arm64.zip" \
+            --asset "release-assets/opencode-go_${VERSION}_linux_amd64.zip" \
+            --asset "release-assets/opencode-go_${VERSION}_linux_arm64.zip" \
+            --registry registry.json \
+            --replace
+
+      - name: Validate the updated registry
+        run: |
+          set -euo pipefail
+          python3 scripts/validate-registry.py registry.json
+
+      - name: Commit the updated registry
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- registry.json; then
+            echo "registry.json is already up to date"
+            exit 0
+          fi
+          VERSION="$(tr -d '[:space:]' < opencode-go/VERSION)"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add registry.json
+          git commit -m "Update opencode-go registry to ${VERSION}"
+          git push origin "HEAD:${REGISTRY_BRANCH:-main}"

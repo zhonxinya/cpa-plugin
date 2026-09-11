@@ -1,0 +1,39 @@
+name: Validate plugin store
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  validate:
+    name: Validate registry and plugin sources
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: opencode-go/go.mod
+
+      - name: Validate registry schema and artifacts
+        run: |
+          set -euo pipefail
+          python3 scripts/validate-registry.py registry.json
+          # Release-hosted artifacts are checked against the repository URL and
+          # version; the store-mode arguments are only used for local URLs.
+          python3 scripts/check-registry-artifacts.py registry.json \
+            --artifacts-dir .local-store/artifacts \
+            --url-prefix http://127.0.0.1:18080/artifacts
+          python3 -m unittest discover -s tests -p 'test_*.py' -v
+
+      - name: Test opencode-go plugin
+        working-directory: opencode-go
+        run: |
+          set -euo pipefail
+          go test ./...
+          go vet ./...
+          python3 -m unittest discover -s scripts -p 'test_*.py' -v
