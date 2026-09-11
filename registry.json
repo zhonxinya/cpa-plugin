@@ -1,4 +1,41 @@
 {
   "schema_version": 2,
-  "plugins": []
+  "plugins": [
+    {
+      "id": "opencode-go",
+      "author": "zhonxinya",
+      "license": "MIT",
+      "version": "0.1.0",
+      "repository": "https://github.com/zhonxinya/cpa-plugin",
+      "name": "opencode-go",
+      "description": "opencode-go plugin",
+      "homepage": "https://github.com/zhonxinya/cpa-plugin",
+      "tags": [
+        "Usage"
+      ],
+      "install": {
+        "type": "direct",
+        "artifacts": [
+          {
+            "goos": "darwin",
+            "goarch": "arm64",
+            "url": "https://github.com/zhonxinya/cpa-plugin/releases/download/v0.1.0/opencode-go_0.1.0_darwin_arm64.zip",
+            "sha256": "f7b30c495daf66993b460b355ce80422862022abc8136e43cc037ebb4205fed9"
+          },
+          {
+            "goos": "linux",
+            "goarch": "amd64",
+            "url": "https://github.com/zhonxinya/cpa-plugin/releases/download/v0.1.0/opencode-go_0.1.0_linux_amd64.zip",
+            "sha256": "43fb51a8aad097ff2a985198197075dbbc4466ac0e1daba1fcfe60904858e9af"
+          },
+          {
+            "goos": "linux",
+            "goarch": "arm64",
+            "url": "https://github.com/zhonxinya/cpa-plugin/releases/download/v0.1.0/opencode-go_0.1.0_linux_arm64.zip",
+            "sha256": "ad779132f40f88e9b690c1c4349f8178d3f1996a3998dad06629969cc097d31c"
+          }
+        ]
+      }
+    }
+  ]
 }
